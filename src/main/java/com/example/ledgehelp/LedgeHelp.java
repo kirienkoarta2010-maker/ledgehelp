@@ -1,0 +1,31 @@
+package com.example.ledgehelp;
+
+import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.common.Mod;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+
+@Mod(LedgeHelp.MODID)
+public class LedgeHelp {
+    public static final String MODID = "ledgehelp";
+
+    public LedgeHelp(IEventBus modBus) {
+        modBus.addListener(this::registerPayloads);
+    }
+
+    private void registerPayloads(RegisterPayloadHandlersEvent event) {
+        PayloadRegistrar registrar = event.registrar("1");
+
+        // клиент -> сервер: игрок держит / отпустил клавишу
+        registrar.playToServer(HoldPayload.TYPE, HoldPayload.CODEC, (payload, ctx) -> {
+            if (ctx.player() instanceof ServerPlayer sp) {
+                LedgeServer.setHolding(sp, payload.holding());
+            }
+        });
+
+        // сервер -> клиенты: какая поза сейчас у игрока
+        registrar.playToClient(PoseSyncPayload.TYPE, PoseSyncPayload.CODEC,
+                (payload, ctx) -> PoseState.set(payload.id(), payload.pose()));
+    }
+}

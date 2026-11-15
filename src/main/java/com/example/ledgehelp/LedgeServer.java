@@ -1,0 +1,222 @@
+package com.example.ledgehelp;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Mth;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.tick.PlayerTickEvent;
+import net.neoforged.neoforge.network.PacketDistributor;
+
+/** Вся серверная логика: повисание на краю, протягивание руки, вытягивание. */
+@EventBusSubscriber(modid = LedgeHelp.MODID)
+public final class LedgeServer {
+    private static final int REACH_TICKS = 20; // рука тянется вниз (1 сек)
+    private static final int HAUL_TICKS = 30;  // подтягивание (1.5 сек)
+
+    private record Hang(BlockPos ledge, Direction dir, Vec3 pos) {}
+
+    private static final class Helper {
+        final UUID target;
+        int ticks;
+        Helper(UUID target) { this.target = target; }
+    }
+
+    private static final Set<UUID> HOLDING = new HashSet<>();
+    private static final Map<UUID, Hang> HANGING = new HashMap<>();
+    private static final Map<UUID, Helper> HELPERS = new HashMap<>();
+    private static final Set<UUID> BEING_HELPED = new HashSet<>();
+    private static final Set<UUID> CLIMBING = new HashSet<>();
+    private static final Map<UUID, Integer> POSES = new HashMap<>();
+
+    public static void setHolding(ServerPlayer p, boolean holding) {
+        if (holding) HOLDING.add(p.getUUID());
+        else HOLDING.remove(p.getUUID());
+    }
+
+    @SubscribeEvent
+    public static void onTick(PlayerTickEvent.Post e) {
+        if (!(e.getEntity() instanceof ServerPlayer p)) return;
+        UUID id = p.getUUID();
+        boolean holding = HOLDING.contains(id);
+
+        Helper helper = HELPERS.get(id);
+        if (helper != null) { tickHelper(p, helper, holding); return; }
+
+        Hang hang = HANGING.get(id);
+        if (hang != null) { tickHanging(p, hang, holding); return; }
+
+        if (!holding) return;
+        if (p.onGround()) tryStartHelping(p);
+        else tryGrab(p);
+    }
+
+    // ---------- повисание ----------
+
+    private static void tryGrab(ServerPlayer p) {
+        if (p.isInWater() || p.getAbilities().flying || p.isPassenger()) return;
+        Level level = p.level();
+        Direction dir = p.getDirection();
+        Vec3 eye = p.getEyePosition();
+        BlockPos ledge = BlockPos.containing(eye.x + dir.getStepX() * 0.7, eye.y, eye.z + dir.getStepZ() * 0.7);
+
+        if (!solidTop(level, ledge) || !isFree(level, ledge.above()) || !isFree(level, ledge.above(2))) return;
+
+        double top = ledge.getY() + 1.0;
+        Vec3 pos = new Vec3(ledge.getX() + 0.5 - dir.getStepX() * 0.8, top - 1.9,
+                ledge.getZ() + 0.5 - dir.getStepZ() * 0.8);
+        if (!level.noCollision(p, p.getBoundingBox().move(pos.subtract(p.position())))) return;
+
+        HANGING.put(p.getUUID(), new Hang(ledge, dir, pos));
+        p.setNoGravity(true);
+        p.setDeltaMovement(Vec3.ZERO);
+        p.fallDistance = 0;
+        teleport(p, pos, dir);
+        setPose(p, PoseState.HANG);
+    }
+
+    private static void tickHanging(ServerPlayer p, Hang hang, boolean holding) {
+        if (CLIMBING.contains(p.getUUID())) return; // двигает помощник
+        if (!holding || p.isShiftKeyDown() || !solidTop(p.level(), hang.ledge())) {
+            release(p);
+            return;
+        }
+        p.setNoGravity(true);
+        p.setDeltaMovement(Vec3.ZERO);
+        p.fallDistance = 0;
+        if (p.position().distanceToSqr(hang.pos()) > 0.04) teleport(p, hang.pos(), hang.dir());
+    }
+
+    // ---------- помощь ----------
+
+    private static void tryStartHelping(ServerPlayer p) {
+        Vec3 pp = p.position();
+        for (ServerPlayer t : p.serverLevel().players()) {
+            if (t == p) continue;
+            UUID tid = t.getUUID();
+            Hang hang = HANGING.get(tid);
+            if (hang == null || CLIMBING.contains(tid) || BEING_HELPED.contains(tid)) continue;
+            if (Math.abs(pp.y - (hang.ledge().getY() + 1.0)) > 0.6) continue;
+            double dx = t.getX() - pp.x, dz = t.getZ() - pp.z;
+            if (dx * dx + dz * dz > 3.5 * 3.5) continue;
+
+            HELPERS.put(p.getUUID(), new Helper(tid));
+            BEING_HELPED.add(tid);
+            setPose(p, PoseState.REACH);
+            return;
+        }
+    }
+
+    private static void tickHelper(ServerPlayer p, Helper h, boolean holding) {
+        ServerPlayer t = p.server.getPlayerList().getPlayer(h.target);
+        Hang hang = HANGING.get(h.target);
+        if (t == null || hang == null || !t.isAlive()) { endHelp(p, h); return; }
+
+        boolean haul = h.ticks >= REACH_TICKS;
+        // пока рука только тянется, помощник может отменить; потом - уже не отменить
+        if (!haul && (!holding || !p.onGround() || p.distanceToSqr(t) > 25.0)) { endHelp(p, h); return; }
+
+        h.ticks++;
+        if (h.ticks < REACH_TICKS) { setPose(p, PoseState.REACH); return; }
+
+        setPose(p, PoseState.HAUL);
+        setPose(t, PoseState.CLIMB);
+        CLIMBING.add(t.getUUID());
+
+        double prog = Math.min(1.0, (h.ticks - REACH_TICKS) / (double) HAUL_TICKS);
+        BlockPos l = hang.ledge();
+        Vec3 a = hang.pos();
+        double up = ease(Math.min(1.0, prog / 0.7));              // сначала вверх
+        double in = ease(Math.max(0.0, (prog - 0.7) / 0.3));      // потом на площадку
+        Vec3 v = new Vec3(
+                Mth.lerp(in, a.x, l.getX() + 0.5),
+                Mth.lerp(up, a.y, l.getY() + 1.02),
+                Mth.lerp(in, a.z, l.getZ() + 0.5));
+        teleport(t, v, hang.dir());
+
+        if (prog >= 1.0) {
+            release(t);
+            endHelp(p, h);
+        }
+    }
+
+    private static void endHelp(ServerPlayer p, Helper h) {
+        HELPERS.remove(p.getUUID());
+        BEING_HELPED.remove(h.target);
+        setPose(p, PoseState.NONE);
+        ServerPlayer t = p.server.getPlayerList().getPlayer(h.target);
+        if (t != null && CLIMBING.contains(h.target)) release(t); // помощь оборвалась на подъёме
+    }
+
+    private static void release(ServerPlayer t) {
+        UUID id = t.getUUID();
+        HANGING.remove(id);
+        CLIMBING.remove(id);
+        BEING_HELPED.remove(id);
+        t.setNoGravity(false);
+        t.fallDistance = 0;
+        setPose(t, PoseState.NONE);
+    }
+
+    // ---------- уборка ----------
+
+    @SubscribeEvent
+    public static void onLogout(PlayerEvent.PlayerLoggedOutEvent e) {
+        if (e.getEntity() instanceof ServerPlayer p) cleanup(p);
+    }
+
+    @SubscribeEvent
+    public static void onDeath(LivingDeathEvent e) {
+        if (e.getEntity() instanceof ServerPlayer p) cleanup(p);
+    }
+
+    private static void cleanup(ServerPlayer p) {
+        UUID id = p.getUUID();
+        HOLDING.remove(id);
+        Helper h = HELPERS.get(id);
+        if (h != null) endHelp(p, h);
+        if (HANGING.containsKey(id)) release(p);
+        POSES.remove(id);
+    }
+
+    // ---------- утилиты ----------
+
+    private static void setPose(ServerPlayer p, int pose) {
+        UUID id = p.getUUID();
+        if (POSES.getOrDefault(id, PoseState.NONE) == pose) return;
+        if (pose == PoseState.NONE) POSES.remove(id);
+        else POSES.put(id, pose);
+        PacketDistributor.sendToPlayersTrackingEntityAndSelf(p, new PoseSyncPayload(id, pose));
+    }
+
+    private static void teleport(ServerPlayer p, Vec3 v, Direction dir) {
+        p.connection.teleport(v.x, v.y, v.z, dir.toYRot(), p.getXRot());
+    }
+
+    private static boolean solidTop(Level level, BlockPos pos) {
+        BlockState s = level.getBlockState(pos);
+        return s.isFaceSturdy(level, pos, Direction.UP);
+    }
+
+    private static boolean isFree(Level level, BlockPos pos) {
+        return level.getBlockState(pos).getCollisionShape(level, pos).isEmpty();
+    }
+
+    private static double ease(double x) {
+        return x * x * (3.0 - 2.0 * x);
+    }
+
+    private LedgeServer() {}
+}
