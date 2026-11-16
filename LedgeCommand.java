@@ -18,6 +18,11 @@ public final class LedgeCommand {
     public static void onRegister(RegisterCommandsEvent event) {
         CommandDispatcher<CommandSourceStack> d = event.getDispatcher();
         d.register(Commands.literal("ledgehelp")
+                .executes(ctx -> {
+                    ctx.getSource().sendSuccess(
+                            () -> Component.literal("Ledge Help " + LedgeHelp.VERSION + " работает"), false);
+                    return 1;
+                })
                 .then(Commands.literal("debug").executes(ctx -> {
                     ServerPlayer p = ctx.getSource().getPlayerOrException();
                     boolean on = LedgeServer.toggleDebug(p);

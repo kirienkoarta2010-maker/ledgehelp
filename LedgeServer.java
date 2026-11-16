@@ -234,6 +234,14 @@ public final class LedgeServer {
     // ---------- уборка ----------
 
     @SubscribeEvent
+    public static void onLogin(PlayerEvent.PlayerLoggedInEvent e) {
+        if (e.getEntity() instanceof ServerPlayer p) {
+            p.sendSystemMessage(Component.literal("Ledge Help " + LedgeHelp.VERSION
+                    + " загружен. Клавиша G: схватиться за край / помочь. Команда /ledgehelp debug включает отладку."));
+        }
+    }
+
+    @SubscribeEvent
     public static void onLogout(PlayerEvent.PlayerLoggedOutEvent e) {
         if (e.getEntity() instanceof ServerPlayer p) cleanup(p);
     }
