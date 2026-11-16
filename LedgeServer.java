@@ -8,6 +8,7 @@ import java.util.UUID;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.Level;
@@ -45,10 +46,26 @@ public final class LedgeServer {
     private static final Set<UUID> CLIMBING = new HashSet<>();
     private static final Map<UUID, Integer> POSES = new HashMap<>();
     private static final Map<UUID, Integer> HINTS = new HashMap<>();
+    private static final Set<UUID> DEBUG = new HashSet<>();
+
+    /** Включает/выключает отладочные сообщения над хотбаром (команда /ledgehelp debug). */
+    public static boolean toggleDebug(ServerPlayer p) {
+        UUID id = p.getUUID();
+        if (DEBUG.remove(id)) return false;
+        DEBUG.add(id);
+        return true;
+    }
+
+    private static void debug(ServerPlayer p, String msg) {
+        if (DEBUG.contains(p.getUUID())) p.displayClientMessage(Component.literal("[LedgeHelp] " + msg), true);
+    }
 
     public static void setHolding(ServerPlayer p, boolean holding) {
-        if (holding) HOLDING.add(p.getUUID());
-        else HOLDING.remove(p.getUUID());
+        if (holding) {
+            if (HOLDING.add(p.getUUID())) debug(p, "клавиша G принята сервером");
+        } else {
+            HOLDING.remove(p.getUUID());
+        }
     }
 
     @SubscribeEvent
@@ -80,6 +97,7 @@ public final class LedgeServer {
             Hang found = findLedge(p);
             setHint(p, found != null ? HINT_GRAB : HINT_NONE);
             if (holding && found != null) grab(p, found);
+            else if (holding && p.tickCount % 20 == 0) debug(p, "в воздухе, G зажата, но край не найден");
         }
     }
 
@@ -91,23 +109,26 @@ public final class LedgeServer {
         Level level = p.level();
         Direction facing = p.getDirection();
         Direction[] order = { facing, facing.getClockWise(), facing.getCounterClockWise(), facing.getOpposite() };
-        double[] probeHeights = { 1.6, 1.1, 0.6 };
+        double[] dists = { 0.7, 1.2, 1.7 };                       // как далеко от игрока может быть стена
+        double[] heights = { 0.6, 1.1, 1.6, 2.1, 2.6, 3.0 };      // на каких высотах от ног ищем
 
         for (Direction dir : order) {
-            for (double h : probeHeights) {
-                BlockPos ledge = BlockPos.containing(
-                        p.getX() + dir.getStepX() * 0.7, p.getY() + h, p.getZ() + dir.getStepZ() * 0.7);
-                if (!solidTop(level, ledge) || !isFree(level, ledge.above()) || !isFree(level, ledge.above(2))) continue;
+            for (double dist : dists) {
+                for (double h : heights) {
+                    BlockPos ledge = BlockPos.containing(
+                            p.getX() + dir.getStepX() * dist, p.getY() + h, p.getZ() + dir.getStepZ() * dist);
+                    if (!solidTop(level, ledge) || !isFree(level, ledge.above()) || !isFree(level, ledge.above(2))) continue;
 
-                double top = ledge.getY() + 1.0;
-                double reach = top - p.getY();
-                if (reach < 0.9 || reach > 2.4) continue; // руки должны достать
+                    double top = ledge.getY() + 1.0;
+                    double reach = top - p.getY();
+                    if (reach < 0.9 || reach > 3.0) continue; // руки должны достать
 
-                Vec3 pos = new Vec3(ledge.getX() + 0.5 - dir.getStepX() * 0.8, top - 1.9,
-                        ledge.getZ() + 0.5 - dir.getStepZ() * 0.8);
-                if (!level.noCollision(p, p.getBoundingBox().move(pos.subtract(p.position())))) continue;
+                    Vec3 pos = new Vec3(ledge.getX() + 0.5 - dir.getStepX() * 0.8, top - 1.9,
+                            ledge.getZ() + 0.5 - dir.getStepZ() * 0.8);
+                    if (!level.noCollision(p, p.getBoundingBox().move(pos.subtract(p.position())))) continue;
 
-                return new Hang(ledge, dir, pos);
+                    return new Hang(ledge, dir, pos);
+                }
             }
         }
         return null;
@@ -120,6 +141,7 @@ public final class LedgeServer {
         p.fallDistance = 0;
         teleport(p, hang.pos(), hang.dir());
         setPose(p, PoseState.HANG);
+        debug(p, "схватился за край");
     }
 
     private static void tickHanging(ServerPlayer p, Hang hang, boolean holding) {
