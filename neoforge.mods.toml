@@ -1,0 +1,26 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "MIT"
+
+[[mods]]
+modId = "ledgehelp"
+version = "1.0.0"
+displayName = "Ledge Help"
+description = '''Повисни на краю обрыва, а друг протянет руку и вытянет тебя наверх.'''
+
+[[mixins]]
+config = "ledgehelp.mixins.json"
+
+[[dependencies.ledgehelp]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.ledgehelp]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1]"
+ordering = "NONE"
+side = "BOTH"
